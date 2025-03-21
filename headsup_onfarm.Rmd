@@ -1,0 +1,276 @@
+---
+title: "headsup_onfarm"
+author: "Ryan Hamilton"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+setwd("C:/Heads Up") #sets working directory
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Start Clean
+```{r eval = TRUE, echo = FALSE, results = 'hide'}
+rm(list = ls(all=TRUE)) # removes all variables in the global environment so you start fresh
+
+options(scipen = 999) # stops anything from being in scientific notation
+```
+
+### Load dependencies, and define some basic functions
+```{r load dependencies, echo = FALSE,  message = FALSE}
+
+#tidyverse/miscellaneous packages
+library("tidyverse")
+library("plyr")
+library("dplyr")
+library("stringr")
+library("latticeExtra")
+library("knitr")
+library("gridExtra")
+library("scales")
+
+#visualization/ggplot packages
+library("ggplot2")
+library("ggpubr")
+library("ggridges")
+library("ggsignif")
+library("RColorBrewer")
+library("ggrepel")
+
+#mapping packages
+library("purrr")
+library("terra")
+
+#statistical analysis packages
+library("rcompanion")
+library("FSA")
+library("rstatix")
+library("car")
+library("matrixStats")
+library("emmeans")
+library("multcomp")
+library("lme4")
+
+#trims leading and trailing spaces
+trim <- function (x) gsub("^\\s+|\\s+$", "", x)
+
+#converts factors to numeric values
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+
+#creates standard error function from sd and sqrt of number of observations
+se <- function(x) sd(x,na.rm=T)/sqrt(length(x))
+
+```
+
+### Read in dataset and parses variables
+```{r include=FALSE}
+headsup_strip<-read.csv(file="C:/Heads Up/headsup_strip.csv",header=T) #reads in dataset
+facs<-c("year","location","rep","trt","product") #assigns factor names to a vector
+headsup_strip[facs]<-lapply(headsup_strip[facs],factor) #uses the char vector to parse variables by col name
+headsup_strip<-headsup_strip %>% mutate(yield_kgha = (yield_bua*67.25))
+str(headsup_strip) #dataframe summary by string
+```
+
+### Let's look at the data and do some resid diagnostics
+```{r echo=FALSE}
+(lmod<-lm(yield_kgha~product+location,data=headsup_strip)) #sets up a simple linear model 
+plot(lmod) #no linear relationship evident bw product and yield
+joint_tests(lmod)
+Anova(lmod)
+drop1(lmod)
+#should we consider transforming the response variable (yield)?
+#(boxcox(lmod)) #no transformation needed, thankfully
+
+```
+
+### Mixed models and summary stats by independent variable = product
+```{r include=FALSE}
+
+#yield vs. product model -- no sig. diff
+lmod_mix<-lmer(yield_kgha~product+(1|year:location:rep),data=headsup_strip) #model optimized for split plot/repeated measures
+#lmod_mix<-lmer(yield_kgha~product+(1|location)+(1|year)+(1|rep),data=headsup_strip) #mixed effects model for RCBD
+summary(lmod_mix) #model summary
+drop1(lmod_mix) #parameter selection
+joint_tests(lmod_mix) #emmeans gtype 3 ANOVA
+Anova(lmod_mix,type=3) #car type 3 ANOVA 
+lsmeans<-emmeans(lmod_mix,"product") #calculates lsmeans
+cld(lsmeans,Letters=letters,alpha=.05) #default is Tukey
+pairs(lsmeans) #all pairwise comparisons
+
+shapiro_test(headsup_strip$yield_kgha) #not normal
+levene_test(headsup_strip,yield_kgha~product) #very homogeneous
+length(headsup_strip$yield_kgha) #n=98, so we can do type I ANOVA on product vs. yield relationships
+
+#overall yield summary by product
+yield_prod<-ddply(headsup_strip, .(product), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd(as.numeric(yield_kgha),na.rm=T)/sqrt(length(yield_kgha)))
+
+#overall yield summary by product
+yield_prod<-ddply(headsup_strip, .(location), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd(as.numeric(yield_kgha),na.rm=T)/sqrt(length(yield_kgha)))
+
+#yield summary by year, location, and product
+yield_prod2<-ddply(headsup_strip, .(year,location,product), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+
+#KW and Dunn's tests for pairwise yield comparisons within site
+(headsup_strip %>% group_by(location) %>% dunn_test(yield_kgha~product)) #ok, one sig. diff at one site in one year
+
+```
+
+### Mixed models and summary stats by independent variable = location
+```{r include=FALSE}
+#yield vs. location model -- def sig. diff between locations
+lmod_mix2<-lmer(yield_kgha~location+(1|product)+(1|year:location:rep),data=headsup_strip) #model optimized for split plot/repeated measures
+#lmod_mix2<-lmer(yield_kgha~product+location+(1|year)+(1|rep),data=headsup_strip) #mixed effects model
+summary(lmod_mix2) #model summary
+drop1(lmod_mix2) #parameter selection
+joint_tests(lmod_mix2) #emmeans gtype 3 ANOVA
+Anova(lmod_mix2,type=3) #car type 3 ANOVA 
+lsmeans2<-emmeans(lmod_mix2,"location") #calculates lsmeans
+cld(lsmeans2,Letters=letters,alpha=.05) #default is Tukey
+pairs(lsmeans2)
+
+shapiro_test(headsup_strip$yield_kgha) #recall that this is NOT normal
+levene_test(headsup_strip,yield_kgha~location) #not at all homogeneous
+#length(headsup_strip$yield_kgha) #n=98, but we can't perform type I ANOVA bc 2 assumptions are violated - KW ONLY!
+
+#KW and Dunn's tests for pairwise yield comparisons between sites
+#these tests provide exact p-values for the cld-type output above
+(headsup_strip %>% group_by(year) %>% dunn_test(yield_kgha~location)) #ok, one sig. diff at one site in one year
+
+yield_year<-ddply(headsup_strip, .(year), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+
+#overall site-level yield summary by product for comparison of mean yield by location - KW only
+yield_loc<-ddply(headsup_strip, .(location), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+
+#yield summary by year, location, and product - KW only
+yield_loc2<-ddply(headsup_strip, .(year,location,product), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+```
+
+### Mixed models and summary stats by independent variable = year
+```{r include=FALSE}
+#yield vs. year -- soybean yield is not sig. diff between years
+lmod_mix3<-lmer(yield_kgha~year+(1|product)+(1|location:rep),data=headsup_strip) 
+#lmod_mix3<-lmer(yield_kgha~product+(1|location)+year+(1|rep),data=headsup_strip) #mixed effects model
+summary(lmod_mix3) #model summary
+drop1(lmod_mix3) #parameter selection
+joint_tests(lmod_mix3) #emmeans gtype 3 ANOVA
+Anova(lmod_mix3,type=3) #car type 3 ANOVA 
+lsmeans3<-emmeans(lmod_mix3,"year") #calculates lsmeans
+cld(lsmeans3)
+pairs(lsmeans3) #default is Tukey
+
+#shapiro_test(headsup_strip$yield_kgha) #recall that this is not normal
+(levene_test(headsup_strip,yield_kgha~year)) #not at all homogeneous
+#length(headsup_strip$yield_kgha) #n=98, but we can't perform type I ANOVA bc 2 assumptions are violated
+
+#KW and Dunn's tests for pairwise yield comparisons within sites
+#these tests provide exact p-values for the cld-type output above
+(headsup_strip %>% #group_by(year) %>% 
+    dunn_test(yield_kgha~product)) #no sig. diff in either year -- exact p-values
+
+#overall experiment-level yield summary by year - KW only
+yield_year<-ddply(headsup_strip, .(year), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+
+#yield summary by year, location, and product - KW only
+yield_year2<-ddply(headsup_strip, .(year,product), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+```
+
+### summary stats for plotting -- turn on if needed
+```{r eval=FALSE, include=FALSE}
+mean(strip_base$yield_kgha,na.rm=T)
+sd(strip_base$yield_kgha,na.rm=T)
+se(strip_base$yield_kgha)
+
+mean(strip_plot$yield_kgha,na.rm=T)
+sd(strip_plot$yield_kgha,na.rm=T)
+se(strip_plot$yield_kgha)
+
+mean(strip_plot$yield_kgha,na.rm=T)-mean(strip_base$yield_kgha,na.rm=T)
+```
+
+### Piano plot
+```{r eval=FALSE, message=TRUE, warning=TRUE, include=FALSE}
+strip_means<-read.csv("C:/Heads Up/strip_plot.csv",header=T) #reads in data
+facs<-c("X","year","location","rep","trt","product") #string of column headers
+strip_means[facs]<-lapply(strip_means[facs],factor) #assigns factors
+str(strip_means) #views summary of the strings
+
+strip_base<-filter(strip_means,product=="BASE") #subsets the base yield response means
+strip_plot<-filter(strip_means,product=="BASE+HEADSUP") #subsets base+headsup for piano-plotting
+strip_plot<-filter(strip_plot,mean_diff!="NA")#removes lines with NAs for plotting
+attach(strip_plot) #brings the df into local environment
+leg<-expression(paste("kg/ha"))
+
+  piano2<-ggplot(strip_plot, aes(x=X,y=mean_diff)) + 
+    geom_bar(aes(fill=mean_diff),position="dodge",stat="identity",width=0.8,fill="orange",color="darkorange") +
+    scale_y_continuous(limits=c(-1000,1000,by=200)) +
+    aes(x=fct_reorder(X,mean_diff)) +
+    labs(title=element_text("On-farm strip trials (2022-2023)"),y=expression(paste("Relative yield difference (kg/ha)")), x=element_text("On farm trials (2022-2023): Differential soybean yield response by experimental replicate (n = 44)")) +
+    theme_classic() +
+    theme(axis.text.y=element_text(color="black",size=14)) +
+    theme(axis.text.x=element_blank()) + 
+    theme(axis.ticks.x=element_blank()) +
+    theme(axis.title.y=element_text(color="black",size=18)) +
+    theme(axis.title.x=element_text(color="black",size=18)) +
+    theme(plot.title=element_blank()) +
+    geom_hline(yintercept=mean(strip_plot$mean_diff,na.rm=T)) + #numeric difference between treatment means (basically 0)
+    geom_hline(linetype="dashed",yintercept=mean(strip_plot$mean_diff,na.rm=T)+(1.96*se(strip_plot$yield_kgha))) + #line at the upper 95% CI limit of the mean yield
+    geom_hline(linetype="dashed",yintercept=mean(strip_plot$mean_diff,na.rm=T)-(1.96*se(strip_plot$yield_kgha))) #line at the lower 95% CI limit of the mean yield
+  piano2
+  piano_leg2<-piano2
+  piano_noleg2<-piano2 +
+    theme(legend.position="none")
+ detach(strip_plot)
+#ggsave("strip_leg.png",path="C:/Heads Up",plot=piano_leg,width=12,height=8,units="in",dpi=320)
+ggsave("strip_noleg2.png",path="C:/Heads Up",plot=piano_noleg2,width=12,height=8,units="in",dpi=600)
+```
+
+### Yield plots
+```{r warning=FALSE}
+#let's plot this real quick
+strip22<-headsup_strip %>% filter(year=="2022") #subsets for plotting by year
+strip23<-headsup_strip %>% filter(year=="2023")
+
+    farm_plot22<-ggplot(data=na.omit(strip22[,c("yield_kgha","location","product")]),aes(x=location,y=(yield_kgha),fill=product)) +
+      geom_boxplot() +
+      ylim(0,6000) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +    
+      labs(title="2022",y=expression(paste("Soybean yield (kg/ha)"))) +
+      theme_classic() +
+      theme(axis.text.x=element_text(angle=45,vjust=0.75,hjust=0.75,color="black")) +
+      theme(legend.text=element_text(size=12)) +
+      theme(legend.title=element_blank()) +    
+      theme(axis.title.x = element_blank()) +
+      theme(axis.text.x = element_text(size=16)) +
+      theme(axis.text.y = element_text(size=12)) +
+      theme(axis.line.x = element_line(color="black", size = 0.8),axis.line.y = element_line(color="black",size=0.8)) +
+      theme(axis.title.y = element_text(color="black",size=18,face="bold")) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      stat_kruskal_test(aes(label=sprintf("P = %5.2f",as.numeric(..p.adj..)),p.adjust.method="none"),size=4,label.y=1,vjust=-1,angle=45)
+      
+    farm_plot22 
+    
+ggsave("farm_plot22.png",path="C:/Heads Up",plot=farm_plot22,width=8,height=8,units="in",dpi=600)
+
+    farm_plot23<-ggplot(data=na.omit(strip23[,c("yield_kgha","location","product")]),aes(x=location,y=(yield_kgha),fill=product)) +
+      geom_boxplot() +
+      ylim(0,6000) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +    
+      labs(title="2023",y=expression(paste("Soybean yield (kg/ha)"))) +
+      theme_classic() +
+      theme(axis.text.x=element_text(angle=45,vjust=0.75,hjust=0.75,color="black")) +
+      theme(legend.text=element_text(size=12)) +
+      theme(legend.title=element_blank()) +    
+      theme(axis.title.x = element_blank()) +
+      theme(axis.text.x = element_text(size=16)) +
+      theme(axis.text.y = element_text(size=12)) +
+      theme(axis.line.x = element_line(color="black", size = 0.8),axis.line.y = element_line(color="black",size=0.8)) +
+      theme(axis.title.y = element_blank()) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      stat_kruskal_test(aes(label=sprintf("P = %5.2f",as.numeric(..p.adj..)),p.adjust.method="none"),size=4,label.y=1,vjust=-1,angle=45)
+      
+    farm_plot23 
+    
+ggsave("farm_plot23.png",path="C:/Heads Up",plot=farm_plot23,width=8,height=8,units="in",dpi=600)
+```

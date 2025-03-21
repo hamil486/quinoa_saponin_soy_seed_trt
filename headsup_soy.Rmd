@@ -1,0 +1,582 @@
+---
+title: "headsup_soy"
+author: "Ryan Hamilton"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+setwd("C:/Heads Up") #sets working directory for entire markdown
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Start Clean
+```{r eval = TRUE, echo = FALSE, results = 'hide'}
+rm(list = ls(all=TRUE)) # removes all variables in the global environment so you start fresh
+
+options(scipen = 999) # stops anything from being in scientific notation
+```
+
+### Load dependencies, and define some basic functions
+```{r load dependencies, echo = FALSE,  message = FALSE}
+#tidyverse/miscellaneous packages
+library("tidyverse")
+library("plyr")
+library("dplyr")
+library("stringr")
+library("latticeExtra")
+library("knitr")
+library("gridExtra")
+library("scales")
+
+#visualization/ggplot packages
+library("ggplot2")
+library("ggpubr")
+library("ggridges")
+library("ggsignif")
+library("RColorBrewer")
+library("ggrepel")
+library("gridExtra")
+library("cowplot")
+
+#mapping packages
+library("purrr")
+library("terra")
+
+#statistical analysis packages
+library("rcompanion")
+library("FSA")
+library("rstatix")
+library("car")
+library("matrixStats")
+library("emmeans")
+library("multcomp")
+library("lme4")
+
+#trims leading and trailing spaces
+trim <- function (x) gsub("^\\s+|\\s+$", "", x)
+
+#converts factors to numeric values
+as.numeric.factor<-function(x) {as.numeric(levels(x))[x]}
+
+#creates standard error function from sd and sqrt of number of observations
+### fixed by RH on 2/6/2025
+se<-function(x) sd((as.numeric(x,na.rm=T))/sqrt(length(x)),na.rm=T)
+```
+
+### Read in dataset and parses variables
+```{r include=FALSE}
+df<-read.csv(file="C:/Heads Up/headsup_2023.csv",header=T) #reads in dataset and assigns to variable "df"
+facs<-c("state","location","year","sds_tol","range","rep","cultivar","trt","product")
+#df[facs]<-lapply(df[facs],factor)#uses the char vector to parse variables by col name
+df[,(1:12)]<-lapply(df[,(1:12)],as.factor) #guess I have to hard code this for some reason?
+str(df) #dataframe summary by string
+```
+
+### Subsets the dataframe df for further analysis
+```{r}
+hu2023<- df %>% filter(year == "2023") #subsets by year
+hu2024<- df %>% filter(year == "2024")
+
+df_base<-filter(df,product=="BASE") #subsets by product
+df_hu<-filter(df,product=="BASE+HEADSUP") 
+
+dem3<- df %>% filter(pl_pop_ha!="NA") #just the 3 sites where disease response data were collected
+dem323<- dem3 %>% filter(year=="2023") #subsets for plotting later
+dem324<- dem3 %>% filter(year=="2024") #subsets for plotting later
+
+dcf_only<-dem3 %>% filter(location=="DECATUR") #DCF only (both years)
+mrc_only<-dem3 %>% filter(location=="MONTCALM") #MRC only (both years)
+```
+
+
+### Let's look at the data, fit a simple regression, and some diagnostics
+```{r include=FALSE}
+attach(df)
+plot(product,yield_kgha) #plots product against all response variables
+plot(product,pl_pop_ha)
+plot(product,rr_dx)
+plot(product,rdw_g)
+plot(product,sdw_g)
+plot(product,f_dx)
+plot(product,wm_dx)
+
+df %>% levene_test(yield_kgha~product) #formal test on variance
+
+(lmod<-lm(yield_kgha~location+year+cultivar+product)) #sets up a simple linear model 
+summary(lmod)
+anova(lmod)
+drop1(lmod)
+plot(lmod) #no linear relationship evident bw product and yield
+
+shapiro_test(df,pl_pop_ha) #formal test on normality of response variables = no normal
+shapiro_test(df,rr_dx) # = not normal
+shapiro_test(df,f_dx) # = not normal (type I ANOVA ok)
+shapiro_test(df,wm_dx) # = not normal
+shapiro_test(df,yield_kgha) # = not normal (type I ANOVA ok due to sample size)
+
+levene_test(df,pl_pop_ha~product) #test on homogeneity of variance = homogeneous
+levene_test(df,rr_dx~product)  # = homogeneous
+levene_test(df,f_dx~product) # = homogeneous
+levene_test(df,wm_dx~product) # = homogeneous
+levene_test(df,yield_kgha~product) # = homogeneous
+
+#should we consider transforming the response variable (yield)?
+(boxcox(lmod)) #squaring yield improves the model -- consider transformation in mixed effects models as well
+detach(df)
+```
+
+### Mixed models and summary yield stats by independent variable = product
+```{r}
+
+#yield vs. product model -- no sig. diff
+#lmod_mix<-lmer(yield_kgha~product+(1|year:location:rep),data=headsup_strip) #model optimized for split plot/repeated measures
+lmod_mix<-lmer(yield_kgha~product+(1|year)+(1|location)+(1|cultivar)+(1|rep),df) #mixed effects model for RCBD -- squaring yield does NOT improve the model -- retain response on observed scale
+summary(lmod_mix) #model summary
+plot(lmod_mix)
+drop1(lmod_mix) #parameter selection
+joint_tests(lmod_mix) #emmeans gtype 3 ANOVA
+Anova(lmod_mix,type=3) #car type 3 ANOVA 
+lsmeans<-emmeans(lmod_mix,"product") #calculates lsmeans
+cld(lsmeans,Letters=letters,alpha=.05) #default is Tukey
+pairs(lsmeans) #all pairwise comparisons
+
+#overall yield summary by product over both years
+yield_sum<-ddply(df, .(year), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd(as.numeric(yield_kgha),na.rm=T)/sqrt(length(yield_kgha)))
+
+#overall yield summary by product over both years
+yield_prod<-ddply(df, .(product), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd(as.numeric(yield_kgha),na.rm=T)/sqrt(length(yield_kgha)))
+
+#yield summary by product and location over both years
+yield_sum2<-ddply(df, .(year,location), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+
+#yield summary by site-year and product
+yield_sum3<-ddply(df, .(year,location,product), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+
+#yield summary by site-year and product
+yield_sum4<-ddply(df, .(year,location,cultivar,product), summarize,mean_yield=mean(as.numeric(yield_kgha),na.rm=T),se_yield=sd((as.numeric(yield_kgha))/sqrt(length(yield_kgha)),na.rm=T))
+
+#KW and Dunn's tests for pairwise yield comparisons betweensite-years
+(df %>% group_by(year,location,cultivar) %>% 
+    dunn_test(yield_kgha~product)) #ok, one sig. diff at one site in one year
+```
+
+### SDS foliar response modeling, summary, and KW tests for tables 
+```{r}
+lmod_fdx<-lmer(f_dx~product+(1|year)+(1|location)+(1|cultivar)+(1|rep),df) #mixed effects model for RCBD -- squaring fdx does NOT improve the model -- retain response on observed scale
+summary(lmod_fdx) #model summary
+plot(lmod_fdx)
+drop1(lmod_fdx) #parameter selection
+joint_tests(lmod_fdx) #emmeans gtype 3 ANOVA
+Anova(lmod_fdx,type=3) #car type 3 ANOVA 
+lsmeans<-emmeans(lmod_fdx,"product") #calculates lsmeans
+cld(lsmeans,Letters=letters,alpha=.05) #default is Tukey
+pairs(lsmeans) #all pairwise comparisons
+
+lmod_dem3<-lmer(f_dx~product+(1|cultivar)+(1|rep),data=dem3) #models just DCF, PLP, and MRC across both years 
+joint_tests(lmod_dem3) #not sig.
+
+lmod_fdx23<-lmer(f_dx~product+(1|cultivar)+(1|rep),data=hu2023) #models Decatur and PLP in 2023 (only sites with FDX collected)
+joint_tests(lmod_fdx23) #not sig.
+
+lmod_fdx24<-lmer(f_dx~product+(1|location)+(1|cultivar)+(1|rep),data=hu2024) #2024 FDX model
+joint_tests(lmod_fdx24) #wow it's sig., but likely driven by high FDX at the St. Joe site
+lsmeans<-emmeans(lmod_fdx24,"product") #calculates lsmeans
+cld(lsmeans,Letters=letters,alpha=.05) #default is Tukey
+pairs(lsmeans) #all pairwise comparisons
+
+#overall f_dx summary by product over both years
+fdx_sum<-ddply(df, .(product), summarize,mean_f_dx=mean(as.numeric(f_dx),na.rm=T),se_f_dx=sd(as.numeric(f_dx),na.rm=T)/sqrt(length(f_dx)))
+
+#f_dx summary by product and location over both years
+fdx_sum2<-ddply(df, .(year,location), summarize,mean_f_dx=mean(as.numeric(f_dx),na.rm=T),se_f_dx=sd((as.numeric(f_dx))/sqrt(length(f_dx)),na.rm=T))
+
+#f_dx summary by site-year and product
+fdx_sum3<-ddply(df, .(year,location,product), summarize,mean_f_dx=mean(as.numeric(f_dx),na.rm=T),se_f_dx=sd((as.numeric(f_dx))/sqrt(length(f_dx)),na.rm=T))
+
+#f_dx summary by site-year and product
+fdx_sum4<-ddply(df, .(year,location,cultivar,product), summarize,mean_f_dx=mean(as.numeric(f_dx),na.rm=T),se_f_dx=sd((as.numeric(f_dx))/sqrt(length(f_dx)),na.rm=T))
+
+#KW and Dunn's tests for pairwise fdx comparisons betweensite-years
+(df %>% group_by(year,location,cultivar) %>% dunn_test(f_dx~product)) #no sig. diff
+```
+
+### plant population plots
+```{r warning=FALSE}
+      pop_plot23<-ggplot(dem323,aes(x=location,y=(pl_pop_ha/10000), fill=product)) +
+      geom_boxplot() +
+      ylim(0,50) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +
+      labs(title="2023",x="",y=expression(paste("Soybean population (10"^4," plants/hectare)"))) +
+      theme(axis.title.x = element_blank()) +
+      theme(axis.line.x=element_line(color="black",size=0.8),axis.line.y=element_line(color="black",size=0.8)) +
+      theme_classic() +
+      stat_kruskal_test((aes(label=sprintf("P = %5.2f",as.numeric(..p.adj..)),p.adjust.method="none")),size=6,label.y=0,vjust=1) +
+      stat_compare_means(comparisons = list(c("DECATUR", "EAST_LANSING"), c("EAST_LANSING", "MONTCALM"), c("DECATUR", "MONTCALM")),method="wilcox.test",label="p.signif",size=8,bracket.size=0.5) +
+      theme(axis.text.x = element_text(vjust=-1,hjust=0.5,color="black",size=18)) +
+      theme(axis.text.y = element_text(color="black",size=18)) +
+      theme(axis.title.y = element_text(vjust=2,color="black",size=22)) +
+      theme(legend.text=element_text(size=18)) +
+      theme(legend.title=element_blank()) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      theme(legend.key.size=unit(0.5,units="in"))
+      #annotate("text",label="A",size=18,face="bold",x=0.5,y=110)
+      
+    pop_plot23
+    
+    ggsave("pop_plot23.png",path="C:/Heads Up",plot=pop_plot23,width=12,height=12,units="in",dpi=300)
+    
+    #and now for the 2024 plant pop plot
+      pop_plot24<-ggplot(dem324,aes(x=location,y=(pl_pop_ha/10000), fill=product)) +
+      geom_boxplot() +
+      ylim(0,50) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +
+      labs(title="2024",x="",y=expression(paste("Soybean population (10"^4," plants/hectare)"))) +
+      theme(axis.title.x = element_blank()) +
+      theme(axis.line.x=element_line(color="black",size=0.8),axis.line.y=element_line(color="black",size=0.8)) +
+      theme_classic() +
+      stat_kruskal_test((aes(label=sprintf("P = %5.2f",as.numeric(..p.adj..)),p.adjust.method="none")),size=6,label.y=0,vjust=1) +
+      stat_compare_means(comparisons = list(c("DECATUR", "EAST_LANSING"), c("EAST_LANSING", "MONTCALM"), c("DECATUR", "MONTCALM")),method="wilcox.test",label="p.signif",size=8,bracket.size=0.5) +
+      theme(axis.text.x = element_text(vjust=-1,hjust=0.5,color="black",size=18)) +
+      theme(axis.text.y = element_text(color="black",size=18)) +
+      theme(axis.title.y = element_text(vjust=2,color="black",size=22)) +
+      theme(legend.text=element_text(size=18)) +
+      theme(legend.title=element_blank()) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      theme(legend.key.size=unit(0.5,units="in"))
+      
+    pop_plot24
+    
+    ggsave("pop_plot24.png",path="C:/Heads Up",plot=pop_plot24,width=12,height=10,units="in",dpi=300)
+    
+#overall pl_pop_ha summary by product over both years
+pop_sum<-ddply(df, .(product), summarize,mean_pl_pop_ha=mean(as.numeric(pl_pop_ha),na.rm=T),se_pl_pop_ha=sd(as.numeric(pl_pop_ha),na.rm=T)/sqrt(length(pl_pop_ha)))
+
+    
+#overall pl_pop_ha summary by product over both years
+pop_sum.5<-ddply(df, .(year), summarize,mean_pl_pop_ha=mean(as.numeric(pl_pop_ha),na.rm=T),se_pl_pop_ha=sd(as.numeric(pl_pop_ha),na.rm=T)/sqrt(length(pl_pop_ha)))
+
+
+#pl_pop_ha summary by product and location over both years
+pop_sum2<-ddply(df, .(location,product), summarize,mean_pl_pop_ha=mean(as.numeric(pl_pop_ha),na.rm=T),se_pl_pop_ha=sd((as.numeric(pl_pop_ha))/sqrt(length(pl_pop_ha)),na.rm=T))
+
+#pl_pop_ha summary by site-year and product
+pop_sum3<-ddply(df, .(year,location,product), summarize,mean_pl_pop_ha=mean(as.numeric(pl_pop_ha),na.rm=T),se_pl_pop_ha=sd((as.numeric(pl_pop_ha))/sqrt(length(pl_pop_ha)),na.rm=T))
+
+#pl_pop_ha summary by site-year and product
+pop_sum4<-ddply(df, .(year,location,cultivar,product), summarize,mean_pl_pop_ha=mean(as.numeric(pl_pop_ha),na.rm=T),se_pl_pop_ha=sd((as.numeric(pl_pop_ha))/sqrt(length(pl_pop_ha)),na.rm=T))
+
+#KW and Dunn's tests for pairwise pop comparisons betweensite-years
+(df %>% group_by(year,location,cultivar) %>% dunn_test(pl_pop_ha~product)) #no sig. diff
+
+```
+
+
+
+### root rot plots
+```{r warning=FALSE}
+    #starts with 2023 RDX as the "left-hand" plot to combine with 2024
+      rdx_plot23<-ggplot(dem323,aes(x=location,y=rr_dx, fill=product)) +
+      geom_boxplot() +
+      ylim(0,100) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +
+      labs(title="2023",x="",y="Root disease index (RDX)") +
+      theme(axis.title.x = element_blank()) +
+      theme(axis.line.x=element_line(color="black",size=0.8),axis.line.y=element_line(color="black",size=0.8)) +
+      theme_classic() +
+      stat_kruskal_test((aes(label=sprintf("P = %5.2f",as.numeric(..p.adj..)),p.adjust.method="none")),size=6,label.y=0,vjust=1) +
+      stat_compare_means(comparisons = list(c("DECATUR", "EAST_LANSING"), c("EAST_LANSING", "MONTCALM"), c("DECATUR", "MONTCALM")),method="wilcox.test",label="p.signif",size=8,bracket.size=0.5) +
+      theme(axis.text.x = element_text(vjust=-1,hjust=0.5,color="black",size=18)) +
+      theme(axis.text.y = element_text(color="black",size=18)) +
+      theme(axis.title.y = element_text(vjust=1,color="black",size=22)) +
+      theme(legend.text=element_text(size=18)) +
+      theme(legend.title=element_blank()) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      theme(legend.key.size=unit(0.5,units="in"))
+      
+    rdx_plot23
+    
+    ggsave("rdx_plot23.png",path="C:/Heads Up",plot=rdx_plot23,width=12,height=10,units="in",dpi=300)
+    
+    #and now for the 2024 RDX plot
+      rdx_plot24<-ggplot(dem324, aes(x=location,y=rr_dx, fill=product)) +
+      geom_boxplot() +
+      ylim(0,100) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +
+      labs(title="2024",x="",y="Root disease index (RDX)") +
+      theme(axis.title.x = element_blank()) +
+      theme(axis.line.x=element_line(color="black",size=0.8),axis.line.y=element_line(color="black",size=0.8)) +
+      theme_classic() +
+      stat_kruskal_test((aes(label=sprintf("P = %5.2f",as.numeric(..p.adj..)),p.adjust.method="none")),size=6,label.y=0,vjust=1) +
+      stat_compare_means(comparisons = list(c("DECATUR", "EAST_LANSING"), c("EAST_LANSING", "MONTCALM"), c("DECATUR", "MONTCALM")),method="wilcox.test",label="p.signif",size=8,bracket.size=0.5) +
+      theme(axis.text.x = element_text(vjust=-1,hjust=0.5,color="black",size=18)) +
+      theme(axis.text.y = element_text(color="black",size=18)) +
+      theme(axis.title.y = element_text(vjust=1,color="black",size=22)) +
+      theme(legend.text=element_text(size=18)) +
+      theme(legend.title=element_blank()) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      theme(legend.key.size=unit(0.5,units="in"))
+      
+    rdx_plot24
+    
+    ggsave("rdx_plot24.png",path="C:/Heads Up",plot=rdx_plot24,width=12,height=10,units="in",dpi=300)
+    
+  #overall rr_dx summary by product over both years
+  rdx_sum<-ddply(df, .(product), summarize,mean_rr_dx=mean(as.numeric(rr_dx),na.rm=T),se_rr_dx=sd(as.numeric(rr_dx),na.rm=T)/sqrt(length(rr_dx)))
+  
+  #rr_dx summary by product and location over both years
+  rdx_sum2<-ddply(df, .(location,product), summarize,mean_rr_dx=mean(as.numeric(rr_dx),na.rm=T),se_rr_dx=sd((as.numeric(rr_dx))/sqrt(length(rr_dx)),na.rm=T))
+  
+  #rr_dx summary by site-year and product
+  rdx_sum3<-ddply(df, .(year,location,product), summarize,mean_rr_dx=mean(as.numeric(rr_dx),na.rm=T),se_rr_dx=sd((as.numeric(rr_dx))/sqrt(length(rr_dx)),na.rm=T))
+  
+  #rr_dx summary by site-year and product
+  rdx_sum4<-ddply(df, .(year,location,cultivar,product), summarize,mean_rr_dx=mean(as.numeric(rr_dx),na.rm=T),se_rr_dx=sd((as.numeric(rr_dx))/sqrt(length(rr_dx)),na.rm=T))
+  
+  #KW and Dunn's tests for pairwise fdx comparisons between cultivars
+(df %>% group_by(year,location,cultivar) %>% dunn_test(rr_dx~product)) #no sig. diff
+```
+
+### COWPLOT
+```{r warning=FALSE}
+#calls the legend and sets the themes within get_legend, not plot_grid
+legend<-get_legend(rdx_plot24 + #extracts legend from one plot
+  guides(color=guide_legend(nrow=2)) + #sets the layout of the legend itself
+  theme(legend.direction="vertical",   #how to arrange the legend key
+        legend.justification="center", #this tells cowplot to center the legend...
+        legend.box.just="right") + #on the right
+  theme(legend.key.size=unit(1,"in")))
+  #theme(legend.margin=margin(0,1,0,0)) #adds some space to the left on the legend
+#sets the title
+title<-ggdraw() + 
+  draw_label("Figure Title Here",size=32,fontface="bold") #sets up a function-call with the title
+#sets the layout grid
+cow_combo<-plot_grid(
+  pop_plot23 + theme(legend.position="none"), #removes legend from individual plots
+  pop_plot24 + theme(legend.position="none"),
+  rdx_plot23 + theme(legend.position="none"),
+  rdx_plot24 + theme(legend.position="none"),
+  ncol=2,nrow=2,align='v',scale=1,labels="AUTO",label_size=32,vjust=1) #arranges all 4 plots together and scales them down a bit to add room between plots
+cow_combo<-plot_grid(cow_combo,legend,rel_widths=c(1,0.125)) #adds the legend
+#cow_combo<-plot_grid(title,cow_combo,ncol=1,rel_heights=c(0.05,1)) #adds the title -- rel_heights values control vertical title margins
+ggsave("cow_combo.png",plot=cow_combo,width=24,height=18,units="in",dpi=600)
+```
+
+### summary stats for plotting -- turn on if needed
+```{r include=FALSE}
+mean(df_base$yield_kgha,na.rm=T)
+sd(df_base$yield_kgha,na.rm=T)
+se(df_base$yield_kgha)
+
+mean(df_hu$yield_kgha,na.rm=T)
+sd(df_hu$yield_kgha,na.rm=T)
+se(df_hu$yield_kgha)
+```
+
+### Piano plot
+```{r echo=FALSE, message=TRUE, warning=TRUE}
+hu_means<-read.csv("C:/Heads Up/hu_plot.csv",header=T) #reads in data
+facs<-c("X","year","location","cultivar","product") #string of column headers
+hu_means[facs]<-lapply(hu_means[facs],factor) #assigns factors
+str(hu_means) #views summary of the strings
+
+hu_base<-filter(hu_means,product=="BASE") #subsets the base yield response means
+hu_plot<-filter(hu_means,product=="BASE+HEADSUP") #subsets base+headsup for piano-plotting
+attach(hu_plot) #brings the df into local environment
+leg<-expression(paste("kg/ha"))
+
+  piano<-ggplot(hu_plot, aes(x=X,y=mean_diff)) + 
+    geom_bar(aes(fill=mean_diff),position="dodge",stat="identity",width=0.8,fill="#009e73",color="#0B645A") +
+    #ylim(-15,15) +
+    scale_y_continuous(limits=c(-1000,1000,by=200)) +
+    #scale_fill_gradient2(leg,low="red2",high="green4") +
+    aes(x=fct_reorder(X,mean_diff)) +
+    labs(title=element_text("Small plot trials (2023-2024)"),y=expression(paste("Relative yield difference (kg/ha)")), x=element_text("Small plot trials (2023-2024): Differential soybean yield response by experimental replicate (n = 80)")) +
+    theme_classic2() +
+    theme(axis.text.y=element_text(color="black",size=14)) +
+    theme(axis.text.x=element_blank()) + 
+    theme(axis.ticks.x=element_blank()) +
+    theme(axis.title.y=element_text(color="black",size=18)) +
+    theme(axis.title.x=element_text(color="black",size=18)) +
+    theme(plot.title=element_blank()) +
+    geom_hline(yintercept=mean(hu_plot$mean_diff)) + #numeric difference between treatment means (basically 0)
+    geom_hline(linetype="dashed",yintercept=mean(hu_plot$mean_diff)+(1.96*se(df_hu$yield_kgha))) + #line at the upper 95% CI limit of the mean yield
+    geom_hline(linetype="dashed",yintercept=mean(hu_plot$mean_diff)-(1.96*se(df_hu$yield_kgha))) #line at the lower 95% CI limit of the mean yield
+  piano
+  piano_leg<-piano
+  piano_noleg<-piano +
+    theme(legend.position="none")
+ detach(hu_plot)
+#ggsave("piano_leg.png",path="C:/Heads Up",plot=piano_leg,width=12,height=8,units="in",dpi=320)
+ggsave("piano_noleg.png",path="C:/Heads Up",plot=piano_noleg,width=12,height=8,units="in",dpi=600)
+```
+### cow pianos!
+```{r}
+### THIS looks like a job for cowplot!
+#sets the title
+title<-ggdraw() + 
+  draw_label("Figure Title Here",size=32,fontface="bold") #sets up a function-call with the title
+#sets the layout grid
+cow_piano<-plot_grid(
+  piano_noleg, #removes legend from individual plots
+  piano_noleg2 + theme(legend.position="none"),
+  ncol=1,nrow=2,align='h',scale=1,labels="AUTO",label_size=24,vjust=2,hjust=0) #arranges all 4 plots together and scales them down a bit to add room between plots
+#(cow_yield<-plot_grid(cow_yield,legend2,rel_widths=c(2,0.25)))#no legend
+cow_piano<-plot_grid(cow_piano,ncol=1,rel_heights=c(0.05,1)) #adds the title -- rel_heights values control vertical title margins
+ggsave("cow_piano.png",path="C:/Heads Up",plot=cow_piano,width=16,height=12,units="in",dpi=600)
+```
+
+
+### cool, experiment-wide but what's our type II error rate on treatment?
+```{r include=FALSE}
+t.test(df_base$yield_kgha,df_hu$yield_kgha,alternative="two.sided",var.equal=T) #students t-test -- classic 
+power.t.test(n=315,sd=14.55,power=0.8,alternative="two.sided") #precise power test 
+```
+
+### Yield plots
+```{r}
+#let's plot this real quick
+    yield_plot_23<-ggplot(data=na.omit(hu2023[,c("yield_kgha","location","product")]),aes(x=location,y=yield_kgha,fill=product)) +
+      geom_boxplot() +
+      ylim(0,7000) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +    
+      labs(title="2023",y=expression(paste("Soybean yield (kg/ha)"))) +
+      theme_classic() +
+      theme(axis.text.x=element_text(angle=45,vjust=0.75,hjust=0.75,color="black")) +
+      theme(plot.title = element_text(size=18,hjust = 0.5)) +
+      theme(legend.text=element_text(size=12)) +
+      theme(legend.title=element_blank()) +    
+      theme(axis.title.x = element_blank()) +
+      theme(axis.ticks.x=element_blank()) +
+      theme(axis.text.x = element_text(size=16)) +
+      theme(axis.text.y = element_text(size=12)) +
+      theme(axis.line.x = element_line(color="black", size = 0.8),axis.line.y = element_line(color="black",size=0.8)) +
+      theme(axis.title.y = element_text(color="black",size=18,face="bold")) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      stat_compare_means(aes(label=sprintf("P = %5.2f",as.numeric(..p..))),label.y=1,angle=45)
+        
+    yield_plot_23
+    
+ggsave("yield_plot_23.png",path="C:/Heads Up",plot=yield_plot_23,width=8,height=8,units="in",dpi=600)
+
+#let's plot this real quick
+    yield_plot_24<-ggplot(data=na.omit(hu2024[,c("yield_kgha","location","product")]),aes(x=location,y=yield_kgha,fill=product)) +
+      geom_boxplot() +
+      ylim(0,7000) +
+      scale_fill_hue(labels = c("Base", "Base +\nHeads Up")) +
+      labs(title="2024",y=expression(paste("Soybean yield (kg/ha)"))) +
+      theme_classic() +
+      theme(axis.text.x=element_text(angle=45,vjust=0.75,hjust=0.75,color="black")) +
+      theme(plot.title = element_text(size=18,hjust = 0.5)) +
+      theme(legend.text=element_text(size=12)) +
+      theme(legend.title=element_blank()) +
+      theme(axis.title.y = element_text(color="black",size=18)) +
+      theme(axis.title.x = element_blank()) +
+      theme(axis.title.y = element_blank()) +
+      theme(axis.ticks.x=element_blank()) +
+      theme(axis.text.x = element_text(size=16)) +
+      theme(axis.text.y = element_text(size=12)) +
+      theme(axis.line.x = element_line(color="black", size = 0.8),axis.line.y = element_line(color="black", size = 0.8)) +
+      theme(plot.title=element_text(color="black",size=18,face="bold",hjust=0.5)) +
+      stat_compare_means(aes(label=sprintf("P = %5.2f",as.numeric(..p..))),label.y=1,angle=45)
+        
+    yield_plot_24
+    
+ggsave("yield_plot_24.png",path="C:/Heads Up",plot=yield_plot_24,width=12,height=8,units="in",dpi=600)
+
+df %>% group_by(year,location) %>% dunn_test(yield_kgha~product) #just checking :)
+```
+
+### Yeah... cowplot is to recursive to not have its own chunk
+```{r}
+### THIS looks like a job for cowplot!
+#calls the legend and sets the themes within get_legend, not plot_grid
+legend2<-get_legend(yield_plot_23 + #extracts legend from one plot
+  guides(color=guide_legend(nrow=2)) + #sets the layout of the legend itself
+  theme(legend.direction="vertical",   #how to arrange the legend key
+        legend.justification="center", #this tells cowplot to center the legend...
+        legend.box.just="right") + #on the right
+  theme(legend.key.size=unit(.75,"in"))) 
+  theme(legend.margin=margin(c(0,0,0,1.5))) #adds some space to the left on the legend
+#sets the title
+title<-ggdraw() + 
+  draw_label("Figure Title Here",size=32,fontface="bold") #sets up a function-call with the title
+#sets the layout grid
+cow_yield<-plot_grid(
+  yield_plot_23 + theme(legend.position="none"), #removes legend from individual plots
+  yield_plot_24 + theme(legend.position="none"),
+  farm_plot22 + theme(legend.position="none"),
+  farm_plot23 + theme(legend.position="none"),
+  ncol=2,nrow=2,align='h',scale=1,labels="AUTO",label_size=24,vjust=2,hjust=0) #arranges all 4 plots together and scales them down a bit to add room between plots
+(cow_yield<-plot_grid(cow_yield,legend2,rel_widths=c(2,0.25)))#adds the legend
+#cow_combo<-plot_grid(title,cow_combo,ncol=1,rel_heights=c(0.05,1)) #adds the title -- rel_heights values control vertical title margins
+ggsave("cow_yield.png",path="C:/Heads Up",plot=cow_yield,width=18,height=18,units="in",dpi=600)
+```
+
+### WMDX response modeling, summary, and KW tests for tables 
+```{r}
+lmod_wmdx<-lmer(wm_dx~product+(1|year)+(1|location)+(1|cultivar)+(1|rep),df) #mixed effects model for RCBD -- squaring wmdx does NOT improve the model -- retain response on observed scale
+summary(lmod_wmdx) #model summary
+plot(lmod_wmdx)
+drop1(lmod_wmdx) #parameter selection
+joint_tests(lmod_wmdx) #emmeans gtype 3 ANOVA
+Anova(lmod_wmdx,type=3) #car type 3 ANOVA 
+lsmeans<-emmeans(lmod_wmdx,"product") #calculates lsmeans
+cld(lsmeans,Letters=letters,alpha=.05) #default is Tukey
+pairs(lsmeans) #all pairwise comparisons
+
+lmod_df<-lmer(wm_dx~product+(1|cultivar)+(1|location)+(1|rep),data=df) #models just DCF, PLP, and MRC across both years 
+joint_tests(lmod_df) #not sig.
+
+lmod_wmdx23<-lmer(wm_dx~product+(1|cultivar)+(1|location)+(1|rep),data=hu2023) #models Decatur and PLP in 2023 (only sites with wmdx collected)
+joint_tests(lmod_wmdx23) #not sig.
+
+lmod_wmdx24<-lmer(wm_dx~product+cultivar+(1|rep),data=hu2024) #2024 wmdx model
+joint_tests(lmod_wmdx24) #wow it's sig., but likely driven by high wmdx at the St. Joe site
+lsmeans<-emmeans(lmod_wmdx24,"product") #calculates lsmeans
+cld(lsmeans,Letters=letters,alpha=.05) #default is Tukey
+pairs(lsmeans) #all pairwise comparisons
+
+#overall wm_dx summary by product over both years
+wmdx_sum<-ddply(df, .(product), summarize,mean_wm_dx=mean(as.numeric(wm_dx),na.rm=T),se_wm_dx=sd(as.numeric(wm_dx),na.rm=T)/sqrt(length(wm_dx)))
+
+#wm_dx summary by product and location over both years
+wmdx_sum2<-ddply(df, .(location,product), summarize,mean_wm_dx=mean(as.numeric(wm_dx),na.rm=T),se_wm_dx=sd((as.numeric(wm_dx))/sqrt(length(wm_dx)),na.rm=T))
+
+#wm_dx summary by site-year and product
+wmdx_sum3<-ddply(df, .(year,location,product), summarize,mean_wm_dx=mean(as.numeric(wm_dx),na.rm=T),se_wm_dx=sd((as.numeric(wm_dx))/sqrt(length(wm_dx)),na.rm=T))
+
+#wm_dx summary by site-year and product
+wmdx_sum4<-ddply(df, .(year,location,cultivar,product), summarize,mean_wm_dx=mean(as.numeric(wm_dx),na.rm=T),se_wm_dx=sd((as.numeric(wm_dx))/sqrt(length(wm_dx)),na.rm=T))
+
+#KW and Dunn's tests for pairwise wmdx comparisons betweensite-years
+(df %>% group_by(year,location) %>% dunn_test(wm_dx~product)) #no sig. diff
+```
+### WMDX plots
+```{r warning=FALSE}
+wm_df<-filter(df,location=="MONTCALM")
+
+wmdx_plot<-ggplot(wm_df,aes(x=year,y=wm_dx, fill=product)) +
+      geom_boxplot() +
+      ylim(0,100) +
+      labs(title="White Mold Symptoms by Year and Treatment: Montcalm",x="",y=expression(paste("White Mold Disease Index (WMDX)"))) +
+      theme(axis.title.x = element_blank()) +
+      theme_classic() +
+      stat_kruskal_test(aes(label=sprintf("P = %5.2f",as.numeric(..p..))),size=6,label.y=0,vjust=1,p.adjust.method="none") +
+      stat_compare_means(comparisons = list(c("2023", "2024")),method="wilcox.test",label="p.signif",size=6,bracket.size=0.5) +
+      theme(axis.text.x = element_text(vjust=-1,hjust=0.5,color="black",size=24)) +
+      theme(axis.text.y = element_text(color="black",size=18)) +
+      theme(axis.title.y = element_text(vjust=2,color="black",size=24)) +
+      theme(legend.text=element_text(size=18)) +
+      scale_fill_discrete(labels=c("Base", "Base +\nHeads Up")) +
+      theme(legend.title=element_blank()) +
+      theme(plot.title=element_text(color="black",size=24)) +
+      theme(legend.key.size=unit(0.5,units="in"))
+      
+    wmdx_plot
+    
+    ggsave("wmdx_plot.png",path="C:/Heads Up",plot=wmdx_plot,width=10,height=8,units="in",dpi=300)
+```
+
+
+
